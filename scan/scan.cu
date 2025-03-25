@@ -1,3 +1,5 @@
+#include <__clang_cuda_builtin_vars.h>
+#include <__clang_cuda_runtime_wrapper.h>
 #include <stdio.h>
 
 #include <cuda.h>
@@ -29,6 +31,23 @@ static inline int nextPow2(int n)
     return n;
 }
 
+__global__ void upsweep_kernel(int* data, int N, int twod, int twod1) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    if (i < N && i % twod1 == 0) {
+        data[i + twod1 - 1] += data[i + twod - 1];
+    }
+}
+
+__global__ void downsweep_kernel(int* data, int N, int twod, int twod1) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (i < N && i % twod1 == 0) {        int t = data[i + twod - 1];
+        data[i + twod - 1] = data[i + twod1 - 1];
+        data[i + twod1 - 1] += t;
+    }
+}
+
 void exclusive_scan(int* device_data, int length)
 {
     /* TODO
@@ -43,6 +62,22 @@ void exclusive_scan(int* device_data, int length)
      * both the data array is sized to accommodate the next
      * power of 2 larger than the input.
      */
+    const int threads_per_block = 512;
+    const int blocks = (length + threads_per_block - 1) / threads_per_block;
+
+    const int N = nextPow2(length);
+    for (int twod = 1; twod < length; twod *= 2) {
+        int twod1 = 2 * twod;
+        upsweep_kernel<<<blocks, threads_per_block>>>(device_data, N, twod, twod1);
+        cudaDeviceSynchronize();
+    }
+    device_data[length - 1] = 0;
+
+    for (int twod = length / 2; twod >= 1; twod /= 2) {
+        int twod1 = 2 * twod;
+        downsweep_kernel<<<blocks, threads_per_block>>>(device_data, N, twod, twod1);
+        cudaDeviceSynchronize();
+    }
 }
 
 /* This function is a wrapper around the code you will write - it copies the
@@ -108,7 +143,8 @@ double cudaScanThrust(int* inarray, int* end, int* resultarray) {
     return overallDuration;
 }
 
-
+__global__ void find_peaks_kernel(int* out, int* input, int len) {
+}
 
 int find_peaks(int *device_input, int length, int *device_output) {
     /* TODO:
@@ -125,6 +161,20 @@ int find_peaks(int *device_input, int length, int *device_output) {
      * it requires that. However, you must ensure that the results of
      * find_peaks are correct given the original length.
      */
+
+    // a[i] = prefix[i] - prefix[i - 1]
+    // peak: a[i] > a[i - 1] && a[i] > a[i + 1]
+    const int threads_per_block = 512;
+    const int blocks = (length + threads_per_block - 1) / threads_per_block;
+
+    int* raw;
+    int rounded_length = nextPow2(length);
+    cudaMalloc(&raw, rounded_length);
+    cudaMemcpy(raw, device_input, rounded_length, cudaMemcpyDeviceToDevice);
+
+    exclusive_scan(device_input, length);   // raw data -> prefix sum
+
+    cudaFree(raw);
     return 0;
 }
 
