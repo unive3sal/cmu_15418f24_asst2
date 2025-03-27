@@ -143,7 +143,17 @@ double cudaScanThrust(int* inarray, int* end, int* resultarray) {
     return overallDuration;
 }
 
-__global__ void find_peaks_kernel(int* out, int* input, int len) {
+__global__ void find_peaks_kernel(bool* out, int* prefix_sum, int len) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (i > 0 && i < len - 1) {
+        int current_num = prefix_sum[i + 1] - prefix_sum[i];
+        int preceed_num = prefix_sum[i] - prefix_sum[i - 1];
+        int follow_num = prefix_sum[i + 2] - prefix_sum[i + 1];
+        if (current_num > preceed_num && current_num > follow_num) {
+            out[i] = true;
+        }
+    }
 }
 
 int find_peaks(int *device_input, int length, int *device_output) {
@@ -161,21 +171,34 @@ int find_peaks(int *device_input, int length, int *device_output) {
      * it requires that. However, you must ensure that the results of
      * find_peaks are correct given the original length.
      */
-
-    // a[i] = prefix[i] - prefix[i - 1]
-    // peak: a[i] > a[i - 1] && a[i] > a[i + 1]
     const int threads_per_block = 512;
     const int blocks = (length + threads_per_block - 1) / threads_per_block;
 
-    int* raw;
-    int rounded_length = nextPow2(length);
-    cudaMalloc(&raw, rounded_length);
-    cudaMemcpy(raw, device_input, rounded_length, cudaMemcpyDeviceToDevice);
-
+    // a[i] = prefix[i + 1] - prefix[i]
+    // peak: a[i] > a[i - 1] && a[i] > a[i + 1]
+    int last = device_input[length - 1];
     exclusive_scan(device_input, length);   // raw data -> prefix sum
 
-    cudaFree(raw);
-    return 0;
+    int* prefix_sum;
+    bool* flag_map;
+    cudaMalloc(&prefix_sum, (length + 1) * sizeof(int));
+    cudaMalloc(&flag_map, length * sizeof(bool));
+    cudaMemcpy(prefix_sum, device_input, length * sizeof(int), cudaMemcpyDeviceToDevice);
+    prefix_sum[length] = last + prefix_sum[length - 1];
+    find_peaks_kernel<<<blocks, threads_per_block>>>(flag_map, prefix_sum, length);
+    cudaDeviceSynchronize();
+
+    int out_idx = 0;
+    for (int i = 0; i < length; ++i) {
+        if (flag_map[i]) {
+            device_output[out_idx++] = i;
+        }
+    }
+
+    cudaFree(prefix_sum);
+    cudaFree(flag_map);
+
+    return out_idx;
 }
 
 
