@@ -1,5 +1,3 @@
-#include <__clang_cuda_builtin_vars.h>
-#include <__clang_cuda_runtime_wrapper.h>
 #include <stdio.h>
 
 #include <cuda.h>
@@ -71,7 +69,7 @@ void exclusive_scan(int* device_data, int length)
         upsweep_kernel<<<blocks, threads_per_block>>>(device_data, N, twod, twod1);
         cudaDeviceSynchronize();
     }
-    device_data[length - 1] = 0;
+    cudaMemset(device_data + length - 1, 0, 1);
 
     for (int twod = length / 2; twod >= 1; twod /= 2) {
         int twod1 = 2 * twod;
@@ -184,16 +182,18 @@ int find_peaks(int *device_input, int length, int *device_output) {
     cudaMalloc(&prefix_sum, (length + 1) * sizeof(int));
     cudaMalloc(&flag_map, length * sizeof(bool));
     cudaMemcpy(prefix_sum, device_input, length * sizeof(int), cudaMemcpyDeviceToDevice);
-    prefix_sum[length] = last + prefix_sum[length - 1];
+    //cudaMemset(prefix_sum + length, last + prefix_sum[length - 1], 1);
     find_peaks_kernel<<<blocks, threads_per_block>>>(flag_map, prefix_sum, length);
     cudaDeviceSynchronize();
 
     int out_idx = 0;
+    /*
     for (int i = 0; i < length; ++i) {
         if (flag_map[i]) {
             device_output[out_idx++] = i;
         }
     }
+    */
 
     cudaFree(prefix_sum);
     cudaFree(flag_map);
