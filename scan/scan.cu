@@ -69,7 +69,7 @@ void exclusive_scan(int* device_data, int length)
         upsweep_kernel<<<blocks, threads_per_block>>>(device_data, N, twod, twod1);
         cudaDeviceSynchronize();
     }
-    cudaMemset(device_data + length - 1, 0, 1);
+    cudaMemset(device_data + length - 1, 0, 1 * sizeof(int));
 
     for (int twod = length / 2; twod >= 1; twod /= 2) {
         int twod1 = 2 * twod;
@@ -141,15 +141,27 @@ double cudaScanThrust(int* inarray, int* end, int* resultarray) {
     return overallDuration;
 }
 
-__global__ void find_peaks_kernel(bool* out, int* prefix_sum, int len) {
+__global__ void find_peaks_kernel(int* mask, const int* nums, const int len) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
 
     if (i > 0 && i < len - 1) {
-        int current_num = prefix_sum[i + 1] - prefix_sum[i];
-        int preceed_num = prefix_sum[i] - prefix_sum[i - 1];
-        int follow_num = prefix_sum[i + 2] - prefix_sum[i + 1];
-        if (current_num > preceed_num && current_num > follow_num) {
-            out[i] = true;
+        if (nums[i] > nums[i - 1] && nums[i] > nums[i + 1]) {
+            mask[i] = 1;
+        }
+    }
+}
+
+__global__ void set_peaks_idx_kernel(
+        const int* mask_prefix,
+        const int* mask,
+        int* device_output,
+        const int len
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (i < len) {
+        if (mask[i] == 1) {
+            device_output[mask_prefix[i]] = i;
         }
     }
 }
@@ -172,33 +184,29 @@ int find_peaks(int *device_input, int length, int *device_output) {
     const int threads_per_block = 512;
     const int blocks = (length + threads_per_block - 1) / threads_per_block;
 
-    // a[i] = prefix[i + 1] - prefix[i]
-    // peak: a[i] > a[i - 1] && a[i] > a[i + 1]
-    int last = device_input[length - 1];
-    exclusive_scan(device_input, length);   // raw data -> prefix sum
+    int* idx_mask;
+    int rounded_length = nextPow2(length);
+    cudaMalloc(&idx_mask, rounded_length * sizeof(int));
+    cudaMemset(idx_mask, 0, rounded_length * sizeof(int));
 
-    int* prefix_sum;
-    bool* flag_map;
-    cudaMalloc(&prefix_sum, (length + 1) * sizeof(int));
-    cudaMalloc(&flag_map, length * sizeof(bool));
-    cudaMemcpy(prefix_sum, device_input, length * sizeof(int), cudaMemcpyDeviceToDevice);
-    //cudaMemset(prefix_sum + length, last + prefix_sum[length - 1], 1);
-    find_peaks_kernel<<<blocks, threads_per_block>>>(flag_map, prefix_sum, length);
+    find_peaks_kernel<<<blocks, threads_per_block>>>(idx_mask, device_input, length);
     cudaDeviceSynchronize();
 
-    int out_idx = 0;
-    /*
-    for (int i = 0; i < length; ++i) {
-        if (flag_map[i]) {
-            device_output[out_idx++] = i;
-        }
-    }
-    */
+    int* mask_prefix;
+    cudaMalloc(&mask_prefix, rounded_length * sizeof(int));
+    cudaMemcpy(mask_prefix, idx_mask, rounded_length * sizeof(int), cudaMemcpyDeviceToDevice);
 
-    cudaFree(prefix_sum);
-    cudaFree(flag_map);
+    int peak_len = 0;
+    exclusive_scan(mask_prefix, length);
+    cudaMemcpy(&peak_len, mask_prefix + length - 1, 1 * sizeof(int), cudaMemcpyDeviceToHost);
+    set_peaks_idx_kernel<<<blocks, threads_per_block>>>(mask_prefix, idx_mask, device_output, length);
+    cudaDeviceSynchronize();
 
-    return out_idx;
+
+    cudaFree(idx_mask);
+    cudaFree(mask_prefix);
+
+    return peak_len;
 }
 
 
