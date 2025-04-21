@@ -1,3 +1,6 @@
+#include <atomic>
+#include <cassert>
+#include <cstdio>
 #include <string>
 #include <algorithm>
 #define _USE_MATH_DEFINES
@@ -330,7 +333,7 @@ shadePixel(float2 pixelCenter, float3 p, float4* imagePtr, int circleIndex) {
     float diffY = p.y - pixelCenter.y;
     float pixelDist = diffX * diffX + diffY * diffY;
 
-    float rad = cuConstRendererParams.radius[circleIndex];;
+    float rad = cuConstRendererParams.radius[circleIndex];
     float maxDist = rad * rad;
 
     // Circle does not contribute to the image
@@ -385,51 +388,58 @@ shadePixel(float2 pixelCenter, float3 p, float4* imagePtr, int circleIndex) {
     // END SHOULD-BE-ATOMIC REGION
 }
 
+template<typename T>
+__device__ __forceinline__ const T& clamp(const T& val, const T& lo, const T& hi) {
+    assert(lo < hi);
+    return (val > lo) ? ((val < hi) ? val : hi) : lo;
+}
+
 // kernelRenderCircles -- (CUDA device code)
 //
 // Each thread renders a circle.  Since there is no protection to
 // ensure order of update or mutual exclusion on the output image, the
 // resulting image will be incorrect.
-__global__ void kernelRenderCircles() {
+__global__ void kernelRenderCircles(int baseline) {
 
-    int index = blockIdx.x * blockDim.x + threadIdx.x;
-
-    if (index >= cuConstRendererParams.numberOfCircles)
-        return;
-
-    int index3 = 3 * index;
-
-    // Read position and radius
-    float3 p = *(float3*)(&cuConstRendererParams.position[index3]);
-    float  rad = cuConstRendererParams.radius[index];
-
-    // Compute the bounding box of the circle. The bound is in integer
-    // screen coordinates, so it's clamped to the edges of the screen.
+    // Separate image into different block horizontally
+    // each thread block calculate each image block
     short imageWidth = cuConstRendererParams.imageWidth;
     short imageHeight = cuConstRendererParams.imageHeight;
-    short minX = static_cast<short>(imageWidth * (p.x - rad));
-    short maxX = static_cast<short>(imageWidth * (p.x + rad)) + 1;
-    short minY = static_cast<short>(imageHeight * (p.y - rad));
-    short maxY = static_cast<short>(imageHeight * (p.y + rad)) + 1;
-
-    // A bunch of clamps.  Is there a CUDA built-in for this?
-    short screenMinX = (minX > 0) ? ((minX < imageWidth) ? minX : imageWidth) : 0;
-    short screenMaxX = (maxX > 0) ? ((maxX < imageWidth) ? maxX : imageWidth) : 0;
-    short screenMinY = (minY > 0) ? ((minY < imageHeight) ? minY : imageHeight) : 0;
-    short screenMaxY = (maxY > 0) ? ((maxY < imageHeight) ? maxY : imageHeight) : 0;
-
     float invWidth = 1.f / imageWidth;
     float invHeight = 1.f / imageHeight;
 
-    // For all pixels in the bounding box
-    for (int pixelY=screenMinY; pixelY<screenMaxY; pixelY++) {
-        float4* imgPtr = (float4*)(&cuConstRendererParams.imageData[4 * (pixelY * imageWidth + screenMinX)]);
-        for (int pixelX=screenMinX; pixelX<screenMaxX; pixelX++) {
-            float2 pixelCenterNorm = make_float2(invWidth * (static_cast<float>(pixelX) + 0.5f),
-                                                 invHeight * (static_cast<float>(pixelY) + 0.5f));
-            shadePixel(pixelCenterNorm, p, imgPtr, index);
+    int index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (baseline + index >= static_cast<int>(imageHeight)) {
+        return;
+    }
+
+    for (int i = 0; i < cuConstRendererParams.numberOfCircles; ++i) {
+        int index3 = 3 * i;
+        // Read position and radius
+        float3 p = *(float3*)(&cuConstRendererParams.position[index3]);
+        float  rad = cuConstRendererParams.radius[i];
+
+        // Compute the bounding box of the circle. The bound is in integer
+        // screen coordinates, so it's clamped to the edges of the screen.
+        short minX = static_cast<short>(imageWidth * (p.x - rad));
+        short maxX = static_cast<short>(imageWidth * (p.x + rad)) + 1;
+
+        // A bunch of clamps.  Is there a CUDA built-in for this?
+        short screenMinX = clamp(minX, static_cast<short>(0), imageWidth);
+        short screenMaxX = clamp(maxX, static_cast<short>(0), imageWidth);
+
+        int pixelY = baseline + index;
+
+        for (int pixelX = screenMinX; pixelX < screenMaxX; ++pixelX) {
+            float4* imgPtr = (float4*)(&cuConstRendererParams.imageData[4 * (pixelY * imageWidth + pixelX)]);
+            float2 pixelCenterNorm = make_float2(
+                    invWidth * (static_cast<float>(pixelX) + 0.5f),
+                    invHeight * (static_cast<float>(pixelY) + 0.5f)
+            );
+            shadePixel(pixelCenterNorm, p, imgPtr, i);
             imgPtr++;
         }
+        __syncthreads();
     }
 }
 
@@ -512,7 +522,7 @@ CudaRenderer::setup() {
         cudaDeviceProp deviceProps;
         cudaGetDeviceProperties(&deviceProps, i);
         name = deviceProps.name;
-        if (name.compare("GeForce RTX 2080") == 0)
+        if (name.compare("NVIDIA GeForce RTX 3070") == 0)
         {
             isFastGPU = true;
         }
@@ -527,7 +537,7 @@ CudaRenderer::setup() {
     {
         printf("WARNING: "
                "You're not running on a fast GPU, please consider using "
-               "NVIDIA RTX 2080.\n");
+               "NVIDIA RTX 3070.\n");
         printf("---------------------------------------------------------\n");
     }
     
@@ -656,7 +666,10 @@ CudaRenderer::render() {
     // 256 threads per block is a healthy number
     dim3 blockDim(256, 1);
     dim3 gridDim((numberOfCircles + blockDim.x - 1) / blockDim.x);
+    int total_threads = blockDim.x * gridDim.x;
 
-    kernelRenderCircles<<<gridDim, blockDim>>>();
+    for (int baseline = 0; baseline < image->height; baseline += total_threads) {
+        kernelRenderCircles<<<gridDim, blockDim>>>(baseline);
+    }
     cudaDeviceSynchronize();
 }

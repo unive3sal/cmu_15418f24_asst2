@@ -1,5 +1,5 @@
 EXECUTABLE := render
-LDFLAGS=-L/usr/local/cuda-11.7/lib64/ -lcudart
+LDFLAGS=-L/opt/cuda/lib64/ -lcudart
 CU_FILES   := cudaRenderer.cu
 CU_DEPS    :=
 CC_FILES   := main.cpp display.cpp benchmark.cpp refRenderer.cpp \
